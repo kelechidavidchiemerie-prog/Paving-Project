@@ -1,0 +1,817 @@
+"""
+╔══════════════════════════════════════════════════════════════════╗
+║       Joejeph Global Nigeria Limited — Python Backend             ║
+║       Run:  python server.py                                     ║
+║       Open: http://localhost:8000                                ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Requirements (install once):
+    pip install flask flask-cors
+
+Built-in (no install needed):
+    sqlite3, smtplib, json, os, datetime, hashlib, secrets
+"""
+
+# ──────────────────────────────────────────────────────────────────
+# IMPORTS
+# ──────────────────────────────────────────────────────────────────
+from flask import (Flask, request, jsonify, send_from_directory,
+                   render_template_string, g)
+from flask_cors import CORS
+from datetime import datetime, timedelta
+from functools import wraps
+import sqlite3, smtplib, hashlib, secrets, json, os, re
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# ──────────────────────────────────────────────────────────────────
+# CONFIGURATION  ← Edit these settings
+# ──────────────────────────────────────────────────────────────────
+class Config:
+    # Server
+    PORT        = 8000
+    DEBUG       = True                           # Set False in production
+    SECRET_KEY  = secrets.token_hex(32)          # Auto-generated each run
+
+    # Database (SQLite file — created automatically)
+    DATABASE    = "joseph_global.db"
+
+    # Email Settings  ← Fill in your real email credentials
+    SMTP_HOST   = "smtp.gmail.com"
+    SMTP_PORT   = 587
+    SMTP_USER   = "johnkelechi535@gmail.com"         # ← Your Gmail
+    SMTP_PASS   = "your_app_password_here"        # ← Gmail App Password
+    COMPANY_EMAIL = "johnkelechi535@gmail.com"   # ← Business email
+    SEND_EMAILS = False   # ← Set True once email is configured
+
+    # Company Info
+    COMPANY_NAME    = "Joejeph Global Nigeria Limited"
+    COMPANY_ADDRESS = "14 Paving House, Oregun Road, Ikeja, Lagos"
+    COMPANY_PHONE   = "+234 806 006 2729 | +234 806 317 8456"
+    FOUNDER_NAME    = "John Kelechi Joseph"
+
+    # Admin default credentials (change after first login!)
+    ADMIN_EMAIL    = "johnkelechi535@gmail.com"
+    ADMIN_PASSWORD = "Admin1234!"   # ← Change this immediately
+
+
+# ──────────────────────────────────────────────────────────────────
+# FLASK APP SETUP
+# ──────────────────────────────────────────────────────────────────
+app = Flask(__name__, static_folder=".")
+app.secret_key = Config.SECRET_KEY
+CORS(app, origins=["http://localhost:8000", "http://127.0.0.1:8000"])
+
+# ──────────────────────────────────────────────────────────────────
+# DATABASE
+# ──────────────────────────────────────────────────────────────────
+def get_db():
+    """Get SQLite database connection (per-request)."""
+    if "db" not in g:
+        g.db = sqlite3.connect(
+            Config.DATABASE,
+            detect_types=sqlite3.PARSE_DECLTYPES
+        )
+        g.db.row_factory = sqlite3.Row   # rows behave like dicts
+    return g.db
+
+@app.teardown_appcontext
+def close_db(error):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    """Create all tables if they don't exist."""
+    db = sqlite3.connect(Config.DATABASE)
+    db.executescript("""
+        -- Contact / enquiry submissions
+        CREATE TABLE IF NOT EXISTS enquiries (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT    NOT NULL,
+            email       TEXT    NOT NULL,
+            phone       TEXT,
+            service     TEXT,
+            message     TEXT    NOT NULL,
+            status      TEXT    DEFAULT 'new',   -- new | read | replied
+            ip_address  TEXT,
+            created_at  TEXT    DEFAULT (datetime('now'))
+        );
+
+        -- Projects portfolio
+        CREATE TABLE IF NOT EXISTS projects (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT    NOT NULL,
+            tag         TEXT,
+            location    TEXT,
+            year        TEXT,
+            area        TEXT,
+            material    TEXT,
+            duration    TEXT,
+            description TEXT,
+            overview    TEXT,
+            challenge   TEXT,
+            solution    TEXT,
+            featured    INTEGER DEFAULT 0,
+            is_active   INTEGER DEFAULT 1,
+            created_at  TEXT    DEFAULT (datetime('now'))
+        );
+
+        -- Testimonials
+        CREATE TABLE IF NOT EXISTS testimonials (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT    NOT NULL,
+            role        TEXT,
+            initials    TEXT,
+            rating      INTEGER DEFAULT 5,
+            message     TEXT    NOT NULL,
+            location    TEXT,
+            is_active   INTEGER DEFAULT 1,
+            created_at  TEXT    DEFAULT (datetime('now'))
+        );
+
+        -- Admin accounts
+        CREATE TABLE IF NOT EXISTS admins (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT    NOT NULL,
+            email         TEXT    UNIQUE NOT NULL,
+            password_hash TEXT    NOT NULL,
+            is_active     INTEGER DEFAULT 1,
+            last_login    TEXT,
+            created_at    TEXT    DEFAULT (datetime('now'))
+        );
+
+        -- Login sessions (simple token store)
+        CREATE TABLE IF NOT EXISTS sessions (
+            token       TEXT    PRIMARY KEY,
+            admin_id    INTEGER NOT NULL,
+            expires_at  TEXT    NOT NULL,
+            created_at  TEXT    DEFAULT (datetime('now'))
+        );
+    """)
+    db.commit()
+
+    # ── Seed default admin if none exists ──
+    cursor = db.execute("SELECT COUNT(*) FROM admins")
+    if cursor.fetchone()[0] == 0:
+        pw_hash = hashlib.sha256(Config.ADMIN_PASSWORD.encode()).hexdigest()
+        db.execute(
+            "INSERT INTO admins (name, email, password_hash) VALUES (?,?,?)",
+            (Config.FOUNDER_NAME, Config.ADMIN_EMAIL, pw_hash)
+        )
+
+    # ── Seed sample projects if none exist ──
+    cursor = db.execute("SELECT COUNT(*) FROM projects")
+    if cursor.fetchone()[0] == 0:
+        sample_projects = [
+            ("Lekki Phase 1 Estate Driveway", "Residential", "Lekki, Lagos",
+             "2024", "850 sqm", "Interlocking Cobblestone", "3 weeks",
+             "Premium residential driveway featuring interlocking cobblestone in herringbone layout.",
+             "Commissioned to transform the driveway and entrance forecourt of this luxury estate.",
+             "The existing driveway had drainage issues causing water pooling during rains.",
+             "Our team excavated to 300mm depth and laid high-density interlocking stones.", 1),
+            ("VI Commercial Plaza Walkways", "Commercial", "Victoria Island, Lagos",
+             "2024", "1,200 sqm", "Granite Setts", "5 weeks",
+             "Large-scale commercial walkway across a busy office plaza.",
+             "A prestigious commercial complex required a complete overhaul of their outdoor walkways.",
+             "Working in a live commercial environment required strict noise controls.",
+             "We divided the area into six phases, working weekends to avoid disruption.", 1),
+            ("GRA Ikeja Courtyard Garden", "Landscaping", "GRA Ikeja, Lagos",
+             "2023", "420 sqm", "Sandstone Pavers", "2 weeks",
+             "Serene courtyard garden paving using imported sandstone pavers.",
+             "A corner property needed its courtyard transformed into an entertainment space.",
+             "Irregular shape with large trees required careful custom-cut pavers.",
+             "Custom-cut sandstone pavers were profiled around tree bases.", 0),
+            ("Ajah Estate Road Rehabilitation", "Infrastructure", "Ajah, Lagos",
+             "2023", "2,400 sqm", "Hydraulic Block Pavers", "6 weeks",
+             "Full road rehabilitation of a 450m private estate road.",
+             "Estate management needed a long-term solution for their deteriorated road network.",
+             "Subgrade soil testing revealed expansive clay layers needing deep stabilisation.",
+             "Full soil stabilisation to 600mm then 80mm hydraulic block pavers laid.", 0),
+            ("Banana Island Pool Surround", "Luxury", "Banana Island, Lagos",
+             "2024", "310 sqm", "Travertine & Limestone", "3 weeks",
+             "Upscale pool deck using travertine and limestone for a Mediterranean feel.",
+             "This Banana Island residence required a pool surround worthy of its prestige location.",
+             "Lagos heat required stone selection for non-slip texture and thermal properties.",
+             "Ivory Travertine with honed finish for coping, tumbled surface for deck.", 1),
+            ("Maryland Mall Parking Lot", "Commercial", "Maryland, Lagos",
+             "2022", "3,800 sqm", "Concrete Block Pavers", "8 weeks",
+             "Large commercial parking facility paving for one of Lagos's busiest malls.",
+             "Maryland Mall needed to upgrade their failing asphalt car park surface.",
+             "Hard deadline tied to the mall's anniversary reopening required fast delivery.",
+             "Three paving crews worked in parallel, completing ahead of schedule.", 1),
+        ]
+        db.executemany("""
+            INSERT INTO projects
+            (title,tag,location,year,area,material,duration,
+             description,overview,challenge,solution,featured)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, sample_projects)
+
+    # ── Seed sample testimonials ──
+    cursor = db.execute("SELECT COUNT(*) FROM testimonials")
+    if cursor.fetchone()[0] == 0:
+        sample_testis = [
+            ("Chief Balogun A.", "Homeowner, Lekki Phase 1", "BA", 5,
+             "Joejeph Global transformed our estate driveway completely. The workmanship was impeccable and they finished two days ahead of schedule.", "Lekki"),
+            ("Emeka Nwosu", "Facilities Manager, VI", "EN", 5,
+             "We hired them for our commercial plaza and the results were exceptional. They worked around our operating hours without any disruption.", "Victoria Island"),
+            ("Adaeze Eze", "Property Owner, GRA Ikeja", "AE", 5,
+             "The courtyard garden paving is absolutely stunning. The sandstone pavers look exactly as we imagined and the workmanship is top tier.", "GRA Ikeja"),
+            ("Biodun Fashola", "Mall Director, Maryland", "BF", 5,
+             "Our parking lot has been hassle-free since they completed it. No cracking, no waterlogging. These guys know exactly what they are doing.", "Maryland"),
+            ("Seun Adesanya", "Homeowner, Banana Island", "SA", 5,
+             "The pool surround they installed looks like something from a European resort. Absolutely world-class work right here in Lagos.", "Banana Island"),
+            ("Tunde Bakare", "Estate Manager, Ajah", "TB", 5,
+             "From quote to completion, every interaction was professional. The road rehabilitation has held up perfectly through two rainy seasons.", "Ajah"),
+        ]
+        db.executemany("""
+            INSERT INTO testimonials (name,role,initials,rating,message,location)
+            VALUES (?,?,?,?,?,?)
+        """, sample_testis)
+
+    db.commit()
+    db.close()
+    print(f"✅ Database ready: {Config.DATABASE}")
+    print(f"✅ Admin login:    {Config.ADMIN_EMAIL} / {Config.ADMIN_PASSWORD}")
+
+
+# ──────────────────────────────────────────────────────────────────
+# HELPERS
+# ──────────────────────────────────────────────────────────────────
+def row_to_dict(row):
+    """Convert sqlite3.Row to plain dict."""
+    return dict(row) if row else None
+
+def rows_to_list(rows):
+    """Convert list of sqlite3.Row to list of dicts."""
+    return [dict(r) for r in rows]
+
+def validate_email(email: str) -> bool:
+    return bool(re.match(r"[^@]+@[^@]+\.[^@]+", email))
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def generate_token() -> str:
+    return secrets.token_hex(32)
+
+def success(data=None, message="Success", code=200):
+    resp = {"success": True, "message": message}
+    if data is not None:
+        resp["data"] = data
+    return jsonify(resp), code
+
+def error(message="Error", code=400):
+    return jsonify({"success": False, "error": message}), code
+
+
+# ──────────────────────────────────────────────────────────────────
+# AUTH MIDDLEWARE
+# ──────────────────────────────────────────────────────────────────
+def require_admin(f):
+    """Decorator — protect admin-only routes."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+        if not token:
+            return error("Authentication required", 401)
+
+        db = get_db()
+        session = db.execute(
+            "SELECT * FROM sessions WHERE token = ? AND expires_at > datetime('now')",
+            (token,)
+        ).fetchone()
+
+        if not session:
+            return error("Invalid or expired session. Please log in again.", 401)
+
+        admin = db.execute(
+            "SELECT * FROM admins WHERE id = ? AND is_active = 1",
+            (session["admin_id"],)
+        ).fetchone()
+
+        if not admin:
+            return error("Admin account not found or disabled.", 401)
+
+        g.admin = row_to_dict(admin)
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ──────────────────────────────────────────────────────────────────
+# EMAIL SERVICE
+# ──────────────────────────────────────────────────────────────────
+def send_email(to: str, subject: str, html_body: str) -> bool:
+    """Send an HTML email via SMTP."""
+    if not Config.SEND_EMAILS:
+        print(f"📧 [EMAIL SKIPPED] To: {to} | Subject: {subject}")
+        return True
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = f"{Config.COMPANY_NAME} <{Config.SMTP_USER}>"
+        msg["To"]      = to
+        msg.attach(MIMEText(html_body, "html"))
+        with smtplib.SMTP(Config.SMTP_HOST, Config.SMTP_PORT) as srv:
+            srv.ehlo()
+            srv.starttls()
+            srv.login(Config.SMTP_USER, Config.SMTP_PASS)
+            srv.sendmail(Config.SMTP_USER, to, msg.as_string())
+        print(f"📧 Email sent to {to}")
+        return True
+    except Exception as e:
+        print(f"❌ Email error: {e}")
+        return False
+
+def email_business_notification(name, email, phone, service, message):
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #eee;border-radius:10px;overflow:hidden">
+      <div style="background:#4A3728;padding:24px">
+        <h2 style="color:#E8C06A;margin:0">🔔 New Enquiry Received</h2>
+        <p style="color:#C4A882;margin:6px 0 0">{Config.COMPANY_NAME}</p>
+      </div>
+      <div style="background:#FAF7F2;padding:28px">
+        <table style="width:100%;border-collapse:collapse">
+          {"".join(f'<tr><td style="padding:10px 0;border-bottom:1px solid #F0EAE0;font-weight:600;color:#4A3728;width:110px">{k}</td><td style="padding:10px 0;border-bottom:1px solid #F0EAE0;color:#6B5E4E">{v}</td></tr>'
+            for k,v in [("Name",name),("Email",email),("Phone",phone or "Not provided"),
+                         ("Service",service or "Not specified"),("Message",message)])}
+        </table>
+        <div style="margin-top:20px;padding:14px;background:#fff3cd;border-radius:8px">
+          <p style="margin:0;color:#856404;font-size:13px">
+            ⚡ Reply within 24 hours to maintain our service commitment.
+          </p>
+        </div>
+      </div>
+    </div>"""
+    send_email(Config.COMPANY_EMAIL,
+               f"New Enquiry from {name} — {Config.COMPANY_NAME}", html)
+
+def email_client_confirmation(name, email):
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #eee;border-radius:10px;overflow:hidden">
+      <div style="background:#4A3728;padding:32px;text-align:center">
+        <h1 style="color:#E8C06A;margin:0;font-size:22px">{Config.COMPANY_NAME}</h1>
+        <p style="color:#C4A882;margin:8px 0 0;font-size:13px;letter-spacing:.1em;text-transform:uppercase">Premium Paving Solutions</p>
+      </div>
+      <div style="background:#FAF7F2;padding:32px">
+        <h2 style="color:#4A3728;margin-top:0">Thank you, {name}! 🙏</h2>
+        <p style="color:#6B5E4E;line-height:1.8">
+          We have received your enquiry and one of our team members will be in touch
+          with you <strong>within 24 hours</strong> to discuss your project in detail.
+        </p>
+        <div style="background:#fff;border:1px solid #F0EAE0;border-radius:10px;padding:20px;margin:20px 0">
+          <p style="margin:0 0 12px;color:#4A3728;font-weight:700">📍 Our Office</p>
+          <p style="margin:0;color:#6B5E4E;line-height:1.8">
+            {Config.COMPANY_ADDRESS}<br/>
+            📞 {Config.COMPANY_PHONE}<br/>
+            ✉️ {Config.COMPANY_EMAIL}
+          </p>
+        </div>
+        <p style="color:#8B7355;font-size:13px">
+          ⏰ Business Hours: Monday – Saturday, 7:00 AM – 6:00 PM
+        </p>
+        <hr style="border:none;border-top:1px solid #F0EAE0;margin:24px 0"/>
+        <p style="color:#8B7355;font-size:12px;text-align:center;margin:0">
+          © {datetime.now().year} {Config.COMPANY_NAME}. All rights reserved.
+        </p>
+      </div>
+    </div>"""
+    send_email(email, f"We received your enquiry — {Config.COMPANY_NAME}", html)
+
+
+# ══════════════════════════════════════════════════════════════════
+# ROUTES — FRONTEND (serve HTML)
+# ══════════════════════════════════════════════════════════════════
+@app.route("/")
+def index():
+    """Serve the main website HTML file."""
+    return send_from_directory(".", "index.html")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ROUTES — ENQUIRIES
+# ══════════════════════════════════════════════════════════════════
+@app.route("/api/enquiries", methods=["POST"])
+def submit_enquiry():
+    """
+    PUBLIC — Submit a contact form enquiry.
+    Called by the website contact form.
+    """
+    data = request.get_json()
+    if not data:
+        return error("No data received")
+
+    # Validate required fields
+    name    = str(data.get("name", "")).strip()
+    email   = str(data.get("email", "")).strip()
+    phone   = str(data.get("phone", "")).strip()
+    service = str(data.get("service", "")).strip()
+    message = str(data.get("msg", data.get("message", ""))).strip()
+
+    if not name or len(name) < 2:
+        return error("Please enter your full name")
+    if not email or not validate_email(email):
+        return error("Please enter a valid email address")
+    if not message or len(message) < 10:
+        return error("Message must be at least 10 characters")
+
+    # Save to database
+    db = get_db()
+    db.execute("""
+        INSERT INTO enquiries (name, email, phone, service, message, ip_address)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (name, email, phone, service, message, request.remote_addr))
+    db.commit()
+
+    # Send emails
+    email_business_notification(name, email, phone, service, message)
+    email_client_confirmation(name, email)
+
+    print(f"📋 New enquiry from {name} ({email})")
+    return success(message="Enquiry submitted successfully! We will contact you within 24 hours."), 201
+
+
+@app.route("/api/enquiries", methods=["GET"])
+@require_admin
+def get_enquiries():
+    """ADMIN — Get all enquiries with optional status filter."""
+    status  = request.args.get("status")
+    limit   = int(request.args.get("limit", 50))
+    offset  = int(request.args.get("offset", 0))
+
+    db    = get_db()
+    query = "SELECT * FROM enquiries"
+    params = []
+
+    if status:
+        query += " WHERE status = ?"
+        params.append(status)
+
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params += [limit, offset]
+
+    enquiries = rows_to_list(db.execute(query, params).fetchall())
+    total     = db.execute("SELECT COUNT(*) FROM enquiries").fetchone()[0]
+
+    return success({"enquiries": enquiries, "total": total})
+
+
+@app.route("/api/enquiries/<int:enquiry_id>/status", methods=["PATCH"])
+@require_admin
+def update_enquiry_status(enquiry_id):
+    """ADMIN — Update enquiry status (new → read → replied)."""
+    data   = request.get_json()
+    status = data.get("status")
+
+    if status not in ("new", "read", "replied"):
+        return error("Status must be: new, read, or replied")
+
+    db = get_db()
+    db.execute("UPDATE enquiries SET status = ? WHERE id = ?",
+               (status, enquiry_id))
+    db.commit()
+    return success(message=f"Status updated to '{status}'")
+
+
+@app.route("/api/enquiries/<int:enquiry_id>", methods=["DELETE"])
+@require_admin
+def delete_enquiry(enquiry_id):
+    """ADMIN — Delete an enquiry."""
+    db = get_db()
+    db.execute("DELETE FROM enquiries WHERE id = ?", (enquiry_id,))
+    db.commit()
+    return success(message="Enquiry deleted")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ROUTES — PROJECTS
+# ══════════════════════════════════════════════════════════════════
+@app.route("/api/projects", methods=["GET"])
+def get_projects():
+    """PUBLIC — Get all active projects (with optional filters)."""
+    featured = request.args.get("featured")
+    tag      = request.args.get("tag")
+
+    db     = get_db()
+    query  = "SELECT * FROM projects WHERE is_active = 1"
+    params = []
+
+    if featured is not None:
+        query += " AND featured = ?"
+        params.append(1 if featured == "true" else 0)
+    if tag:
+        query += " AND tag = ?"
+        params.append(tag)
+
+    query += " ORDER BY created_at DESC"
+    projects = rows_to_list(db.execute(query, params).fetchall())
+    return success(projects)
+
+
+@app.route("/api/projects/<int:project_id>", methods=["GET"])
+def get_project(project_id):
+    """PUBLIC — Get a single project by ID."""
+    db = get_db()
+    project = row_to_dict(db.execute(
+        "SELECT * FROM projects WHERE id = ? AND is_active = 1",
+        (project_id,)
+    ).fetchone())
+
+    if not project:
+        return error("Project not found", 404)
+    return success(project)
+
+
+@app.route("/api/projects", methods=["POST"])
+@require_admin
+def create_project():
+    """ADMIN — Create a new project."""
+    data = request.get_json()
+    if not data or not data.get("title"):
+        return error("Project title is required")
+
+    db = get_db()
+    cursor = db.execute("""
+        INSERT INTO projects
+        (title,tag,location,year,area,material,duration,
+         description,overview,challenge,solution,featured)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        data.get("title"), data.get("tag"), data.get("location"),
+        data.get("year"), data.get("area"), data.get("material"),
+        data.get("duration"), data.get("description"),
+        data.get("overview"), data.get("challenge"),
+        data.get("solution"), 1 if data.get("featured") else 0
+    ))
+    db.commit()
+
+    project = row_to_dict(db.execute(
+        "SELECT * FROM projects WHERE id = ?", (cursor.lastrowid,)
+    ).fetchone())
+
+    print(f"✅ Project created: {data.get('title')}")
+    return success(project, "Project created successfully"), 201
+
+
+@app.route("/api/projects/<int:project_id>", methods=["PUT"])
+@require_admin
+def update_project(project_id):
+    """ADMIN — Update a project."""
+    data = request.get_json()
+    db   = get_db()
+
+    existing = db.execute(
+        "SELECT * FROM projects WHERE id = ?", (project_id,)
+    ).fetchone()
+    if not existing:
+        return error("Project not found", 404)
+
+    fields = ["title","tag","location","year","area","material",
+              "duration","description","overview","challenge",
+              "solution","featured","is_active"]
+    updates, values = [], []
+    for f in fields:
+        if f in data:
+            updates.append(f"{f} = ?")
+            values.append(1 if (f in ("featured","is_active") and data[f]) else data[f])
+
+    if updates:
+        values.append(project_id)
+        db.execute(f"UPDATE projects SET {', '.join(updates)} WHERE id = ?", values)
+        db.commit()
+
+    project = row_to_dict(db.execute(
+        "SELECT * FROM projects WHERE id = ?", (project_id,)
+    ).fetchone())
+    return success(project, "Project updated")
+
+
+@app.route("/api/projects/<int:project_id>", methods=["DELETE"])
+@require_admin
+def delete_project(project_id):
+    """ADMIN — Delete a project."""
+    db = get_db()
+    db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    db.commit()
+    return success(message="Project deleted")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ROUTES — TESTIMONIALS
+# ══════════════════════════════════════════════════════════════════
+@app.route("/api/testimonials", methods=["GET"])
+def get_testimonials():
+    """PUBLIC — Get all active testimonials."""
+    db    = get_db()
+    testis = rows_to_list(db.execute(
+        "SELECT * FROM testimonials WHERE is_active = 1 ORDER BY created_at DESC"
+    ).fetchall())
+    return success(testis)
+
+
+@app.route("/api/testimonials", methods=["POST"])
+@require_admin
+def create_testimonial():
+    """ADMIN — Add a testimonial."""
+    data = request.get_json()
+    if not data or not data.get("name") or not data.get("message"):
+        return error("Name and message are required")
+
+    db = get_db()
+    cursor = db.execute("""
+        INSERT INTO testimonials (name,role,initials,rating,message,location)
+        VALUES (?,?,?,?,?,?)
+    """, (
+        data.get("name"), data.get("role"),
+        data.get("initials", data.get("name","")[:2].upper()),
+        data.get("rating", 5), data.get("message"), data.get("location")
+    ))
+    db.commit()
+    testi = row_to_dict(db.execute(
+        "SELECT * FROM testimonials WHERE id = ?", (cursor.lastrowid,)
+    ).fetchone())
+    return success(testi, "Testimonial added"), 201
+
+
+@app.route("/api/testimonials/<int:testi_id>", methods=["DELETE"])
+@require_admin
+def delete_testimonial(testi_id):
+    """ADMIN — Delete a testimonial."""
+    db = get_db()
+    db.execute("DELETE FROM testimonials WHERE id = ?", (testi_id,))
+    db.commit()
+    return success(message="Testimonial deleted")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ROUTES — ADMIN AUTH
+# ══════════════════════════════════════════════════════════════════
+@app.route("/api/admin/login", methods=["POST"])
+def admin_login():
+    """Admin login — returns session token."""
+    data = request.get_json()
+    if not data:
+        return error("No data received")
+
+    email    = str(data.get("email", "")).strip()
+    password = str(data.get("password", ""))
+
+    if not email or not password:
+        return error("Email and password are required")
+
+    db    = get_db()
+    admin = row_to_dict(db.execute(
+        "SELECT * FROM admins WHERE email = ? AND is_active = 1", (email,)
+    ).fetchone())
+
+    if not admin or admin["password_hash"] != hash_password(password):
+        return error("Invalid email or password", 401)
+
+    # Create session token (expires in 24 hours)
+    token      = generate_token()
+    expires_at = (datetime.utcnow() + timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+
+    db.execute(
+        "INSERT INTO sessions (token, admin_id, expires_at) VALUES (?,?,?)",
+        (token, admin["id"], expires_at)
+    )
+    db.execute(
+        "UPDATE admins SET last_login = datetime('now') WHERE id = ?",
+        (admin["id"],)
+    )
+    db.commit()
+
+    print(f"🔐 Admin logged in: {email}")
+    return success({
+        "token":      token,
+        "expires_at": expires_at,
+        "admin": {
+            "id":    admin["id"],
+            "name":  admin["name"],
+            "email": admin["email"]
+        }
+    }, "Login successful")
+
+
+@app.route("/api/admin/logout", methods=["POST"])
+@require_admin
+def admin_logout():
+    """Admin logout — invalidate session."""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    db    = get_db()
+    db.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    db.commit()
+    return success(message="Logged out successfully")
+
+
+@app.route("/api/admin/me", methods=["GET"])
+@require_admin
+def admin_me():
+    """Get current logged-in admin info."""
+    admin = g.admin.copy()
+    admin.pop("password_hash", None)   # Never expose password hash
+    return success(admin)
+
+
+@app.route("/api/admin/change-password", methods=["POST"])
+@require_admin
+def change_password():
+    """Admin change password."""
+    data         = request.get_json()
+    old_password = str(data.get("old_password", ""))
+    new_password = str(data.get("new_password", ""))
+
+    if not old_password or not new_password:
+        return error("Both old and new passwords are required")
+    if len(new_password) < 8:
+        return error("New password must be at least 8 characters")
+
+    db    = get_db()
+    admin = row_to_dict(db.execute(
+        "SELECT * FROM admins WHERE id = ?", (g.admin["id"],)
+    ).fetchone())
+
+    if admin["password_hash"] != hash_password(old_password):
+        return error("Current password is incorrect", 401)
+
+    db.execute(
+        "UPDATE admins SET password_hash = ? WHERE id = ?",
+        (hash_password(new_password), g.admin["id"])
+    )
+    db.commit()
+    return success(message="Password changed successfully")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ROUTES — DASHBOARD STATS
+# ══════════════════════════════════════════════════════════════════
+@app.route("/api/admin/dashboard", methods=["GET"])
+@require_admin
+def dashboard():
+    """ADMIN — Dashboard summary statistics."""
+    db = get_db()
+    return success({
+        "enquiries": {
+            "total":   db.execute("SELECT COUNT(*) FROM enquiries").fetchone()[0],
+            "new":     db.execute("SELECT COUNT(*) FROM enquiries WHERE status='new'").fetchone()[0],
+            "read":    db.execute("SELECT COUNT(*) FROM enquiries WHERE status='read'").fetchone()[0],
+            "replied": db.execute("SELECT COUNT(*) FROM enquiries WHERE status='replied'").fetchone()[0],
+        },
+        "projects": {
+            "total":    db.execute("SELECT COUNT(*) FROM projects").fetchone()[0],
+            "active":   db.execute("SELECT COUNT(*) FROM projects WHERE is_active=1").fetchone()[0],
+            "featured": db.execute("SELECT COUNT(*) FROM projects WHERE featured=1").fetchone()[0],
+        },
+        "testimonials": {
+            "total":  db.execute("SELECT COUNT(*) FROM testimonials").fetchone()[0],
+            "active": db.execute("SELECT COUNT(*) FROM testimonials WHERE is_active=1").fetchone()[0],
+        },
+        "recent_enquiries": rows_to_list(db.execute(
+            "SELECT name,email,service,status,created_at FROM enquiries ORDER BY created_at DESC LIMIT 5"
+        ).fetchall())
+    })
+
+
+# ══════════════════════════════════════════════════════════════════
+# ROUTES — HEALTH CHECK
+# ══════════════════════════════════════════════════════════════════
+@app.route("/api/health", methods=["GET"])
+def health():
+    return success({
+        "status":    "online",
+        "company":   Config.COMPANY_NAME,
+        "founder":   Config.FOUNDER_NAME,
+        "timestamp": datetime.utcnow().isoformat()
+    }, "Server is running")
+
+
+# ──────────────────────────────────────────────────────────────────
+# STARTUP
+# ──────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("\n" + "═"*60)
+    print(f"  {Config.COMPANY_NAME}")
+    print(f"  Python Backend Server")
+    print("═"*60)
+
+    # Initialize DB and seed data
+    init_db()
+
+    print(f"\n🌐 Website:    http://localhost:{Config.PORT}")
+    print(f"📋 API Docs:   http://localhost:{Config.PORT}/api/health")
+    print(f"📊 Dashboard:  POST /api/admin/login  then  GET /api/admin/dashboard")
+    print(f"\n📌 API Endpoints:")
+    print(f"   POST  /api/enquiries          ← Contact form submission")
+    print(f"   GET   /api/projects           ← All projects")
+    print(f"   GET   /api/projects/<id>      ← Single project")
+    print(f"   GET   /api/testimonials       ← All testimonials")
+    print(f"   POST  /api/admin/login        ← Admin login")
+    print(f"   GET   /api/admin/dashboard    ← Dashboard stats (auth)")
+    print(f"\n{'═'*60}\n")
+
+    app.run(
+        host  = "0.0.0.0",
+        port  = Config.PORT,
+        debug = Config.DEBUG
+    )

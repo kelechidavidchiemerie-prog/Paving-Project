@@ -1,0 +1,103 @@
+# Joseph Global Nigeria Limited — Website + Python Backend
+
+## Files
+```
+joseph-global/
+├── index.html        ← The website (frontend)
+├── server.py         ← Python backend (Flask)
+├── requirements.txt  ← Python packages
+└── joseph_global.db  ← SQLite database (auto-created on first run)
+```
+
+## Setup & Run
+
+### 1. Install Python packages
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Configure Email (optional)
+Open `server.py` and edit the `Config` class:
+```python
+SMTP_USER   = "your_gmail@gmail.com"
+SMTP_PASS   = "your_gmail_app_password"
+SEND_EMAILS = True   # Set to True to enable real emails
+```
+> For Gmail App Password: Google Account → Security → 2FA → App Passwords
+
+### 3. Run the server
+```bash
+python server.py
+```
+
+### 4. Open the website
+Visit: **http://localhost:8000**
+
+---
+
+## Default Admin Login
+- **Email:** admin@josephglobal.com.ng
+- **Password:** Admin1234!
+> ⚠️ Change this password immediately after first login!
+
+---
+
+## API Endpoints
+
+| Method | URL | Auth | Description |
+|--------|-----|------|-------------|
+| GET  | `/` | No | Serves website |
+| GET  | `/api/health` | No | Server health check |
+| POST | `/api/enquiries` | No | Submit contact form |
+| GET  | `/api/projects` | No | Get all projects |
+| GET  | `/api/projects/<id>` | No | Get single project |
+| GET  | `/api/testimonials` | No | Get testimonials |
+| POST | `/api/admin/login` | No | Admin login |
+| GET  | `/api/admin/dashboard` | ✅ | Dashboard stats |
+| GET  | `/api/enquiries` | ✅ | All enquiries |
+| POST | `/api/projects` | ✅ | Create project |
+| PUT  | `/api/projects/<id>` | ✅ | Update project |
+| DELETE | `/api/projects/<id>` | ✅ | Delete project |
+
+### Using Admin Endpoints
+```bash
+# 1. Login
+curl -X POST http://localhost:8000/api/admin/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@josephglobal.com.ng","password":"Admin1234!"}'
+
+# 2. Copy the token from the response, then use it:
+curl http://localhost:8000/api/admin/dashboard \
+  -H "Authorization: Bearer YOUR_TOKEN_HERE"
+```
+
+---
+
+## Production Deployment
+
+### Railway (Recommended — Free)
+```bash
+pip install railway
+railway login
+railway init
+railway up
+```
+Add environment variable: `PORT=8000`
+
+### Render
+- Connect your GitHub repo at render.com
+- Start command: `python server.py`
+- Add environment variable: `PORT=10000`
+
+### Any VPS (DigitalOcean, Linode)
+```bash
+# Install dependencies
+pip install -r requirements.txt gunicorn
+
+# Run with Gunicorn (production)
+gunicorn -w 4 -b 0.0.0.0:8000 "server:app"
+```
+
+---
+
+Built with ❤️ for John Kelechi Joseph
